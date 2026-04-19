@@ -1,0 +1,1313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Green Mario Adventure Ultimate</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #5c94fc;
+      font-family: "Courier New", monospace;
+      color: white;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+    .ui {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 16px;
+      background: rgba(0,0,0,0.28);
+      border-bottom: 4px solid #000;
+      z-index: 10;
+      font-weight: bold;
+      text-transform: uppercase;
+      flex-wrap: wrap;
+      pointer-events: none;
+    }
+    .help {
+      position: fixed;
+      bottom: 12px;
+      left: 12px;
+      background: rgba(0,0,0,0.45);
+      border: 3px solid #000;
+      padding: 8px 10px;
+      z-index: 10;
+      font-size: 14px;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="ui">
+    <div id="scoreText">Score: 0</div>
+    <div id="coinText">Coins: 0</div>
+    <div id="powerText">Power: Small</div>
+    <div id="fireText">Fireballs: No</div>
+    <div id="livesText">Lives: 3</div>
+    <div id="statusText">Press Enter to Start</div>
+  </div>
+
+  <canvas id="game"></canvas>
+
+  <div class="help">
+    Move: Arrow Keys / A D &nbsp; Jump: Space / W / Up &nbsp; Fire: F / X &nbsp; Enter Pipe: Down / S &nbsp; Start: Enter &nbsp; Restart: R
+  </div>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    resizeCanvas();
+    window.addEventListener("resize", resizeCanvas);
+
+    const scoreText = document.getElementById("scoreText");
+    const coinText = document.getElementById("coinText");
+    const powerText = document.getElementById("powerText");
+    const fireText = document.getElementById("fireText");
+    const livesText = document.getElementById("livesText");
+    const statusText = document.getElementById("statusText");
+
+    const keys = {};
+    window.addEventListener("keydown", (e) => {
+      const k = e.key.toLowerCase();
+      keys[k] = true;
+      if (["arrowup","arrowdown","arrowleft","arrowright"," ","w","a","s","d","f","x","enter"].includes(k)) {
+        e.preventDefault();
+      }
+
+      if (gameState === "title") {
+        if (k === "arrowleft" || k === "a") selectedWorld = Math.max(0, selectedWorld - 1);
+        if (k === "arrowright" || k === "d") selectedWorld = Math.min(worlds.length - 1, selectedWorld + 1);
+        if (k === "enter") startGame();
+      } else {
+        if (k === "r") hardReset();
+      }
+    });
+    window.addEventListener("keyup", (e) => {
+      keys[e.key.toLowerCase()] = false;
+    });
+
+    let audioCtx = null;
+    function audio() {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      return audioCtx;
+    }
+    function tone(freq, duration = 0.08, type = "square", volume = 0.03) {
+      const ctx2 = audio();
+      const now = ctx2.currentTime;
+      const osc = ctx2.createOscillator();
+      const gain = ctx2.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, now);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(volume, now + 0.01);
+      gain.gain.linearRampToValueAtTime(0, now + duration);
+      osc.connect(gain);
+      gain.connect(ctx2.destination);
+      osc.start(now);
+      osc.stop(now + duration);
+    }
+    function sfxJump() { tone(520, 0.08); }
+    function sfxCoin() { tone(880, 0.05); tone(1180, 0.08); }
+    function sfxPower() { tone(660, 0.06); tone(880, 0.06); tone(1100, 0.12, "triangle"); }
+    function sfxHit() { tone(180, 0.15, "sawtooth", 0.04); }
+    function sfxFire() { tone(420, 0.05, "square"); tone(300, 0.05, "square"); }
+    function sfxWin() { tone(523, 0.08); tone(659, 0.08); tone(784, 0.08); tone(1047, 0.2, "triangle"); }
+
+    const GRAVITY = 0.8;
+    const FRICTION = 0.82;
+    const WORLD_WIDTH = 7600;
+    const GROUND_Y = 560;
+
+    const worlds = [
+      { name: "Grass Land", sky: "#5c94fc", mountain: "#2faa2f", bush: "#1f9e1f", ground: "#c68642" },
+      { name: "Sunset Land", sky: "#f59e0b", mountain: "#b45309", bush: "#78350f", ground: "#92400e" },
+      { name: "Night Land", sky: "#1e3a8a", mountain: "#1d4ed8", bush: "#1e40af", ground: "#374151" }
+    ];
+
+    let selectedWorld = 0;
+    let worldTheme = worlds[0];
+
+    let gameState = "title"; // title, playing, gameover, win
+    let cameraX = 0;
+    let score = 0;
+    let coinsCollected = 0;
+    let lives = 3;
+    let currentArea = "overworld";
+    let pipeCooldown = 0;
+    let fireCooldown = 0;
+    let checkpointActivated = false;
+
+    const player = {
+      x: 120,
+      y: 200,
+      w: 42,
+      h: 56,
+      vx: 0,
+      vy: 0,
+      speed: 0.9,
+      jumpPower: 16,
+      onGround: false,
+      facing: 1,
+      power: "small",
+      invincibleTimer: 0
+    };
+
+    const checkpoint = { x: 6100, y: 300, w: 24, h: 260, active: false };
+
+    const boss = {
+      x: 7220,
+      y: 470,
+      w: 92,
+      h: 90,
+      vx: -1.2,
+      health: 6,
+      alive: true,
+      awakenX: 6800,
+      jumpTimer: 0,
+      shootTimer: 0
+    };
+
+    const overworldStart = { x: 120, y: 200 };
+    const checkpointSpawn = { x: 6140, y: 220 };
+    const undergroundSpawn = { x: 420, y: 120 };
+
+    const areas = {
+      overworld: { width: WORLD_WIDTH },
+      underground: { width: 1800 }
+    };
+
+    const pits = [
+      { x: 1200, w: 100 },
+      { x: 2000, w: 150 },
+      { x: 3050, w: 150 },
+      { x: 4050, w: 150 },
+      { x: 5600, w: 150 }
+    ];
+
+    const platforms = [
+      { x: 0, y: GROUND_Y, w: 1200, h: 120, type: "ground", area: "overworld" },
+      { x: 1300, y: GROUND_Y, w: 700, h: 120, type: "ground", area: "overworld" },
+      { x: 2150, y: GROUND_Y, w: 900, h: 120, type: "ground", area: "overworld" },
+      { x: 3200, y: GROUND_Y, w: 850, h: 120, type: "ground", area: "overworld" },
+      { x: 4200, y: GROUND_Y, w: 1500, h: 120, type: "ground", area: "overworld" },
+      { x: 5850, y: GROUND_Y, w: 1750, h: 120, type: "ground", area: "overworld" },
+
+      { x: 350, y: 450, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 398, y: 450, w: 48, h: 24, type: "question", area: "overworld", used: false, reward: "coin" },
+      { x: 446, y: 450, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+
+      { x: 560, y: 380, w: 48, h: 24, type: "question", area: "overworld", used: false, reward: "mushroom" },
+      { x: 608, y: 380, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 656, y: 380, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+
+      { x: 760, y: 320, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 808, y: 320, w: 48, h: 24, type: "question", area: "overworld", used: false, reward: "coin" },
+
+      { x: 1440, y: 440, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 1488, y: 440, w: 48, h: 24, type: "question", area: "overworld", used: false, reward: "coin" },
+      { x: 1536, y: 440, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+
+      { x: 1710, y: 360, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 1758, y: 360, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 1806, y: 360, w: 48, h: 24, type: "question", area: "overworld", used: false, reward: "coin" },
+
+      { x: 2330, y: 430, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 2378, y: 430, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 2550, y: 340, w: 48, h: 24, type: "question", area: "overworld", used: false, reward: "coin" },
+      { x: 2598, y: 340, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 2810, y: 260, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+
+      { x: 3450, y: 460, w: 140, h: 24, type: "brickWide", area: "overworld" },
+      { x: 3700, y: 390, w: 160, h: 24, type: "brickWide", area: "overworld" },
+
+      { x: 4400, y: 450, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 4448, y: 450, w: 48, h: 24, type: "question", area: "overworld", used: false, reward: "coin" },
+      { x: 4620, y: 360, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 4668, y: 360, w: 48, h: 24, type: "question", area: "overworld", used: false, reward: "coin" },
+
+      { x: 6100, y: 430, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 6148, y: 430, w: 48, h: 24, type: "brick", area: "overworld", broken: false },
+      { x: 6196, y: 430, w: 48, h: 24, type: "question", area: "overworld", used: false, reward: "fireflower" },
+
+      { x: 6800, y: 470, w: 180, h: 24, type: "bossPlatform", area: "overworld" },
+      { x: 7060, y: 390, w: 160, h: 24, type: "bossPlatform", area: "overworld" },
+
+      { x: 0, y: 560, w: 1800, h: 200, type: "ground", area: "underground" },
+      { x: 350, y: 420, w: 140, h: 24, type: "brickWide", area: "underground" },
+      { x: 650, y: 330, w: 140, h: 24, type: "brickWide", area: "underground" },
+      { x: 980, y: 260, w: 140, h: 24, type: "brickWide", area: "underground" }
+    ];
+
+    const movingPlatforms = [
+      { x: 5200, y: 420, w: 120, h: 20, minX: 5050, maxX: 5350, vx: 1.2, area: "overworld" },
+      { x: 5480, y: 340, w: 120, h: 20, minX: 5400, maxX: 5700, vx: -1.4, area: "overworld" },
+      { x: 1250, y: 420, w: 100, h: 20, minX: 1180, maxX: 1480, vx: 1, area: "underground" }
+    ];
+
+    const coins = [
+      { x: 390, y: 400, r: 12, taken: false, area: "overworld" },
+      { x: 610, y: 330, r: 12, taken: false, area: "overworld" },
+      { x: 815, y: 270, r: 12, taken: false, area: "overworld" },
+      { x: 1490, y: 390, r: 12, taken: false, area: "overworld" },
+      { x: 1760, y: 310, r: 12, taken: false, area: "overworld" },
+      { x: 2390, y: 380, r: 12, taken: false, area: "overworld" },
+      { x: 2610, y: 290, r: 12, taken: false, area: "overworld" },
+      { x: 2860, y: 210, r: 12, taken: false, area: "overworld" },
+      { x: 3500, y: 410, r: 12, taken: false, area: "overworld" },
+      { x: 3770, y: 340, r: 12, taken: false, area: "overworld" },
+      { x: 4460, y: 400, r: 12, taken: false, area: "overworld" },
+      { x: 4680, y: 310, r: 12, taken: false, area: "overworld" },
+      { x: 1100, y: 500, r: 12, taken: false, area: "overworld" },
+      { x: 2100, y: 500, r: 12, taken: false, area: "overworld" },
+      { x: 4170, y: 500, r: 12, taken: false, area: "overworld" },
+      { x: 6350, y: 380, r: 12, taken: false, area: "overworld" },
+      { x: 420, y: 370, r: 12, taken: false, area: "underground" },
+      { x: 720, y: 280, r: 12, taken: false, area: "underground" },
+      { x: 1050, y: 210, r: 12, taken: false, area: "underground" },
+      { x: 1500, y: 480, r: 12, taken: false, area: "underground" }
+    ];
+
+    const enemies = [
+      { x: 900, y: 520, w: 40, h: 40, vx: -1.2, alive: true, area: "overworld" },
+      { x: 1580, y: 520, w: 40, h: 40, vx: 1.2, alive: true, area: "overworld" },
+      { x: 2470, y: 520, w: 40, h: 40, vx: -1.4, alive: true, area: "overworld" },
+      { x: 3550, y: 520, w: 40, h: 40, vx: 1.1, alive: true, area: "overworld" },
+      { x: 4520, y: 520, w: 40, h: 40, vx: -1.2, alive: true, area: "overworld" },
+      { x: 6250, y: 520, w: 40, h: 40, vx: -1.3, alive: true, area: "overworld" },
+      { x: 830, y: 520, w: 40, h: 40, vx: 1.1, alive: true, area: "underground" }
+    ];
+
+    const pipes = [
+      { x: 1030, y: 470, w: 70, h: 90, area: "overworld", enter: false },
+      { x: 1930, y: 430, w: 80, h: 130, area: "overworld", enter: true, target: "underground", targetX: 420, targetY: 120 },
+      { x: 3350, y: 450, w: 80, h: 110, area: "overworld", enter: false },
+      { x: 4880, y: 410, w: 90, h: 150, area: "overworld", enter: false },
+      { x: 1500, y: 430, w: 80, h: 130, area: "underground", enter: true, target: "overworld", targetX: 1960, targetY: 260 }
+    ];
+
+    const mushrooms = [];
+    const fireballs = [];
+    const bossFireballs = [];
+
+    function setPlayerSize() {
+      if (player.power === "big" || player.power === "fire") {
+        player.w = 44;
+        player.h = 74;
+      } else {
+        player.w = 42;
+        player.h = 56;
+      }
+    }
+
+    function activePlatforms() {
+      return platforms.filter(p => p.area === currentArea && !(p.type === "brick" && p.broken));
+    }
+    function activeMovingPlatforms() {
+      return movingPlatforms.filter(p => p.area === currentArea);
+    }
+    function activePipes() {
+      return pipes.filter(p => p.area === currentArea);
+    }
+    function activeCoins() {
+      return coins.filter(c => c.area === currentArea);
+    }
+    function activeEnemies() {
+      return enemies.filter(e => e.area === currentArea);
+    }
+    function activePits() {
+      return currentArea === "overworld" ? pits : [];
+    }
+
+    function spawnQuestionReward(block) {
+      if (block.reward === "coin") {
+        score += 100;
+        coinsCollected++;
+        sfxCoin();
+      } else if (block.reward === "mushroom") {
+        mushrooms.push({
+          x: block.x + 10, y: block.y - 20, w: 28, h: 28, vx: 1.2, vy: 0, active: true, area: currentArea, kind: "mushroom"
+        });
+        sfxPower();
+      } else if (block.reward === "fireflower") {
+        mushrooms.push({
+          x: block.x + 10, y: block.y - 20, w: 28, h: 28, vx: 0, vy: 0, active: true, area: currentArea, kind: "flower"
+        });
+        sfxPower();
+      }
+      updateUI();
+    }
+
+    function hitBlockFromBelow(block) {
+      if (block.type === "question" && !block.used) {
+        block.used = true;
+        spawnQuestionReward(block);
+      } else if (block.type === "brick" && !block.broken && (player.power === "big" || player.power === "fire")) {
+        block.broken = true;
+        score += 50;
+        updateUI();
+      }
+    }
+
+    function loseLife() {
+      lives--;
+      if (lives <= 0) {
+        gameState = "gameover";
+        statusText.textContent = "Game Over - Press R";
+        sfxHit();
+        return;
+      }
+
+      const spawn = checkpointActivated ? checkpointSpawn : overworldStart;
+      currentArea = "overworld";
+      player.x = spawn.x;
+      player.y = spawn.y;
+      player.vx = 0;
+      player.vy = 0;
+      player.onGround = false;
+      player.power = "small";
+      player.invincibleTimer = 120;
+      setPlayerSize();
+      cameraX = Math.max(0, player.x - canvas.width * 0.35);
+      statusText.textContent = checkpointActivated ? "Respawned at checkpoint!" : "Try again!";
+      sfxHit();
+      updateUI();
+    }
+
+    function takeHit() {
+      if (player.invincibleTimer > 0) return;
+      if (player.power === "fire") {
+        player.power = "big";
+        player.invincibleTimer = 120;
+        setPlayerSize();
+        updateUI();
+        sfxHit();
+      } else if (player.power === "big") {
+        player.power = "small";
+        player.invincibleTimer = 120;
+        setPlayerSize();
+        updateUI();
+        sfxHit();
+      } else {
+        loseLife();
+      }
+    }
+
+    function enterPipe(pipe) {
+      if (pipeCooldown > 0) return;
+      currentArea = pipe.target;
+      player.x = pipe.targetX;
+      player.y = pipe.targetY;
+      player.vx = 0;
+      player.vy = 0;
+      player.onGround = false;
+      pipeCooldown = 40;
+      cameraX = Math.max(0, player.x - canvas.width * 0.35);
+      statusText.textContent = currentArea === "underground" ? "Underground bonus area!" : "Back outside!";
+    }
+
+    function spawnFireball() {
+      if (fireCooldown > 0 || player.power !== "fire" || gameState !== "playing") return;
+      fireballs.push({
+        x: player.x + (player.facing === 1 ? player.w : -10),
+        y: player.y + player.h / 2,
+        w: 14, h: 14,
+        vx: player.facing * 8,
+        vy: -2,
+        active: true,
+        area: currentArea
+      });
+      fireCooldown = 20;
+      sfxFire();
+    }
+
+    function updatePlayer() {
+      if (gameState !== "playing") return;
+
+      if (pipeCooldown > 0) pipeCooldown--;
+      if (fireCooldown > 0) fireCooldown--;
+      if (player.invincibleTimer > 0) player.invincibleTimer--;
+
+      const left = keys["arrowleft"] || keys["a"];
+      const right = keys["arrowright"] || keys["d"];
+      const jump = keys["arrowup"] || keys["w"] || keys[" "];
+      const down = keys["arrowdown"] || keys["s"];
+      const fire = keys["f"] || keys["x"];
+
+      if (left) {
+        player.vx -= player.speed;
+        player.facing = -1;
+      }
+      if (right) {
+        player.vx += player.speed;
+        player.facing = 1;
+      }
+      if (fire) spawnFireball();
+
+      if (!left && !right) player.vx *= FRICTION;
+      player.vx = Math.max(-7, Math.min(7, player.vx));
+
+      if (jump && player.onGround) {
+        player.vy = -(player.power === "small" ? 16 : 17);
+        player.onGround = false;
+        sfxJump();
+      }
+
+      player.vy += GRAVITY;
+      player.x += player.vx;
+
+      const solidsX = [...activePlatforms(), ...activePipes(), ...activeMovingPlatforms()];
+      solidsX.forEach(obj => {
+        if (rectsCollide(player, obj)) {
+          if (player.vx > 0) player.x = obj.x - player.w;
+          else if (player.vx < 0) player.x = obj.x + obj.w;
+          player.vx = 0;
+        }
+      });
+
+      player.y += player.vy;
+      player.onGround = false;
+
+      const solidsY = [...activePlatforms(), ...activePipes(), ...activeMovingPlatforms()];
+      solidsY.forEach(obj => {
+        if (rectsCollide(player, obj)) {
+          if (player.vy > 0) {
+            player.y = obj.y - player.h;
+            player.vy = 0;
+            player.onGround = true;
+            if (obj.vx) player.x += obj.vx;
+          } else if (player.vy < 0) {
+            player.y = obj.y + obj.h;
+            player.vy = 0;
+            if (obj.type === "brick" || obj.type === "question") hitBlockFromBelow(obj);
+          }
+        }
+      });
+
+      if (down && player.onGround) {
+        activePipes().forEach(pipe => {
+          if (!pipe.enter) return;
+          const standing = player.x + player.w > pipe.x &&
+                           player.x < pipe.x + pipe.w &&
+                           Math.abs((player.y + player.h) - pipe.y) < 8;
+          if (standing) enterPipe(pipe);
+        });
+      }
+
+      if (player.x < 0) player.x = 0;
+
+      if (currentArea === "overworld" && player.y > canvas.height + 300) {
+        loseLife();
+      }
+
+      if (currentArea === "underground" && player.y > 900) {
+        player.x = undergroundSpawn.x;
+        player.y = undergroundSpawn.y;
+        player.vx = 0;
+        player.vy = 0;
+      }
+
+      activeCoins().forEach(coin => {
+        if (!coin.taken && circleRectCollide(coin, player)) {
+          coin.taken = true;
+          coinsCollected++;
+          score += 100;
+          sfxCoin();
+          updateUI();
+        }
+      });
+
+      mushrooms.forEach(m => {
+        if (!m.active || m.area !== currentArea) return;
+        if (rectsCollide(player, m)) {
+          m.active = false;
+          if (m.kind === "mushroom") player.power = "big";
+          if (m.kind === "flower") player.power = "fire";
+          setPlayerSize();
+          score += 500;
+          sfxPower();
+          updateUI();
+        }
+      });
+
+      activeEnemies().forEach(enemy => {
+        if (!enemy.alive) return;
+        if (rectsCollide(player, enemy)) {
+          const playerBottom = player.y + player.h;
+          if (player.vy > 0 && playerBottom - enemy.y < 22) {
+            enemy.alive = false;
+            player.vy = -10;
+            score += 250;
+            updateUI();
+          } else {
+            takeHit();
+          }
+        }
+      });
+
+      if (currentArea === "overworld" && !checkpoint.active && rectsCollide(player, checkpoint)) {
+        checkpoint.active = true;
+        checkpointActivated = true;
+        score += 500;
+        updateUI();
+        statusText.textContent = "Checkpoint reached!";
+        sfxPower();
+      }
+
+      if (currentArea === "overworld" && boss.alive && player.x > boss.awakenX) {
+        if (rectsCollide(player, boss)) {
+          const playerBottom = player.y + player.h;
+          if (player.vy > 0 && playerBottom - boss.y < 28) {
+            boss.health--;
+            player.vy = -12;
+            score += 400;
+            if (boss.health <= 0) {
+              boss.alive = false;
+              score += 3000;
+              statusText.textContent = "Boss defeated! Reach the flag!";
+              sfxWin();
+            }
+            updateUI();
+          } else {
+            takeHit();
+          }
+        }
+      }
+
+      bossFireballs.forEach(f => {
+        if (!f.active || f.area !== currentArea) return;
+        if (rectsCollide(player, f)) {
+          f.active = false;
+          takeHit();
+        }
+      });
+
+      if (currentArea === "overworld" && !boss.alive && player.x + player.w > 7480 - 20) {
+        gameState = "win";
+        score += 1000;
+        updateUI();
+        statusText.textContent = "You Win! Press R";
+        sfxWin();
+      }
+
+      const areaWidth = areas[currentArea].width;
+      cameraX = Math.max(0, Math.min(player.x - canvas.width * 0.35, areaWidth - canvas.width));
+    }
+
+    function updateEnemies() {
+      if (gameState !== "playing") return;
+      activeEnemies().forEach(enemy => {
+        if (!enemy.alive) return;
+        enemy.x += enemy.vx;
+
+        const areaLeft = enemy.x - 60;
+        const areaRight = enemy.x + enemy.w + 60;
+        if (currentArea === "overworld") {
+          const footX1 = areaLeft + 8;
+          const footX2 = areaRight - 8;
+          if (activePits().some(p => footX1 < p.x + p.w && footX2 > p.x)) enemy.vx *= -1;
+        }
+
+        [...activePlatforms(), ...activePipes(), ...activeMovingPlatforms()].forEach(obj => {
+          if (rectsCollide(enemy, obj)) {
+            enemy.vx *= -1;
+            if (enemy.vx > 0) enemy.x = obj.x + obj.w + 1;
+            else enemy.x = obj.x - enemy.w - 1;
+          }
+        });
+      });
+    }
+
+    function updateMovingPlatforms() {
+      activeMovingPlatforms().forEach(p => {
+        p.x += p.vx;
+        if (p.x < p.minX || p.x > p.maxX) p.vx *= -1;
+      });
+    }
+
+    function updatePowerups() {
+      mushrooms.forEach(m => {
+        if (!m.active || m.area !== currentArea) return;
+        if (m.kind === "flower") return;
+
+        m.vy += 0.6;
+        m.x += m.vx;
+
+        [...activePlatforms(), ...activePipes(), ...activeMovingPlatforms()].forEach(obj => {
+          if (rectsCollide(m, obj)) {
+            if (m.vy > 0) {
+              m.y = obj.y - m.h;
+              m.vy = 0;
+            } else if (m.vx > 0) {
+              m.x = obj.x - m.w;
+              m.vx *= -1;
+            } else if (m.vx < 0) {
+              m.x = obj.x + obj.w;
+              m.vx *= -1;
+            }
+          }
+        });
+
+        m.y += m.vy;
+        [...activePlatforms(), ...activePipes(), ...activeMovingPlatforms()].forEach(obj => {
+          if (rectsCollide(m, obj) && m.vy > 0) {
+            m.y = obj.y - m.h;
+            m.vy = 0;
+          }
+        });
+      });
+    }
+
+    function updateFireballs() {
+      fireballs.forEach(f => {
+        if (!f.active || f.area !== currentArea) return;
+        f.vy += 0.3;
+        f.x += f.vx;
+        f.y += f.vy;
+
+        [...activePlatforms(), ...activePipes(), ...activeMovingPlatforms()].forEach(obj => {
+          if (rectsCollide(f, obj)) {
+            if (f.vy > 0 && f.y + f.h < obj.y + 20) {
+              f.y = obj.y - f.h;
+              f.vy = -5;
+            } else {
+              f.active = false;
+            }
+          }
+        });
+
+        activeEnemies().forEach(enemy => {
+          if (enemy.alive && rectsCollide(f, enemy)) {
+            enemy.alive = false;
+            f.active = false;
+            score += 250;
+            updateUI();
+          }
+        });
+
+        if (currentArea === "overworld" && boss.alive && rectsCollide(f, boss)) {
+          boss.health--;
+          f.active = false;
+          score += 300;
+          if (boss.health <= 0) {
+            boss.alive = false;
+            score += 3000;
+            statusText.textContent = "Boss defeated! Reach the flag!";
+            sfxWin();
+          }
+          updateUI();
+        }
+
+        if (f.x < 0 || f.x > WORLD_WIDTH || f.y > 900) f.active = false;
+      });
+
+      bossFireballs.forEach(f => {
+        if (!f.active || f.area !== currentArea) return;
+        f.x += f.vx;
+        if (f.x < 0 || f.x > WORLD_WIDTH) f.active = false;
+      });
+    }
+
+    function updateBoss() {
+      if (currentArea !== "overworld" || !boss.alive || gameState !== "playing") return;
+      if (player.x < boss.awakenX) return;
+
+      boss.x += boss.vx;
+      boss.jumpTimer++;
+      boss.shootTimer++;
+
+      if (boss.x < 7000 || boss.x > 7360) boss.vx *= -1;
+
+      if (boss.jumpTimer > 100) {
+        boss.y -= 80;
+        boss.jumpTimer = 0;
+      }
+      if (boss.y < 470) {
+        boss.y += 4;
+        if (boss.y > 470) boss.y = 470;
+      }
+
+      if (boss.shootTimer > 70) {
+        boss.shootTimer = 0;
+        bossFireballs.push({
+          x: boss.x + (boss.vx < 0 ? 0 : boss.w),
+          y: boss.y + 30,
+          w: 18,
+          h: 18,
+          vx: boss.vx < 0 ? -4 : 4,
+          vy: 0,
+          active: true,
+          area: "overworld"
+        });
+        sfxFire();
+      }
+    }
+
+    function drawSky() {
+      if (gameState === "title") {
+        ctx.fillStyle = "#5c94fc";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+
+      if (currentArea === "underground") {
+        ctx.fillStyle = "#111";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#222";
+        for (let i = 0; i < canvas.width; i += 80) {
+          for (let j = 0; j < canvas.height; j += 60) ctx.fillRect(i, j, 10, 10);
+        }
+        return;
+      }
+
+      ctx.fillStyle = worldTheme.sky;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const clouds = [
+        { x: 180, y: 120 }, { x: 700, y: 160 }, { x: 1200, y: 110 },
+        { x: 1800, y: 140 }, { x: 2500, y: 120 }, { x: 3400, y: 150 },
+        { x: 4300, y: 120 }, { x: 5900, y: 150 }, { x: 7000, y: 120 }
+      ];
+
+      clouds.forEach(c => {
+        const x = c.x - cameraX * 0.5;
+        const y = c.y;
+        ctx.fillStyle = "white";
+        ctx.fillRect(x, y, 70, 28);
+        ctx.fillRect(x + 12, y - 14, 22, 16);
+        ctx.fillRect(x + 32, y - 18, 26, 18);
+        ctx.fillRect(x + 52, y - 12, 18, 14);
+      });
+    }
+
+    function drawMountains() {
+      if (gameState !== "playing" && gameState !== "win" && gameState !== "gameover") return;
+      if (currentArea !== "overworld") return;
+
+      const mountains = [
+        { x: 200, w: 250, h: 180 }, { x: 900, w: 220, h: 160 }, { x: 1700, w: 260, h: 190 },
+        { x: 2800, w: 240, h: 170 }, { x: 3900, w: 280, h: 200 }, { x: 5900, w: 260, h: 180 }
+      ];
+
+      mountains.forEach(m => {
+        const x = m.x - cameraX * 0.7;
+        ctx.fillStyle = worldTheme.mountain;
+        ctx.beginPath();
+        ctx.moveTo(x, GROUND_Y + 120);
+        ctx.lineTo(x + m.w / 2, GROUND_Y + 120 - m.h);
+        ctx.lineTo(x + m.w, GROUND_Y + 120);
+        ctx.closePath();
+        ctx.fill();
+      });
+    }
+
+    function drawBushes() {
+      if (currentArea !== "overworld") return;
+      const bushes = [
+        { x: 120, y: GROUND_Y + 68 }, { x: 1450, y: GROUND_Y + 68 }, { x: 2750, y: GROUND_Y + 68 },
+        { x: 4360, y: GROUND_Y + 68 }, { x: 6100, y: GROUND_Y + 68 }
+      ];
+      bushes.forEach(b => {
+        const x = b.x - cameraX;
+        const y = b.y;
+        ctx.fillStyle = worldTheme.bush;
+        ctx.fillRect(x, y, 90, 26);
+        ctx.fillRect(x + 12, y - 18, 26, 20);
+        ctx.fillRect(x + 32, y - 24, 28, 24);
+        ctx.fillRect(x + 56, y - 16, 22, 18);
+      });
+    }
+
+    function drawPlatforms() {
+      activePlatforms().forEach(p => {
+        const x = p.x - cameraX;
+        const y = p.y;
+
+        if (p.type === "ground") {
+          ctx.fillStyle = currentArea === "underground" ? "#6d4c41" : worldTheme.ground;
+          ctx.fillRect(x, y, p.w, p.h);
+          for (let bx = 0; bx < p.w; bx += 40) {
+            for (let by = 0; by < p.h; by += 40) {
+              ctx.strokeStyle = "#000";
+              ctx.strokeRect(x + bx, y + by, 40, 40);
+            }
+          }
+        } else if (p.type === "brick" && !p.broken) {
+          ctx.fillStyle = "#b87333";
+          ctx.fillRect(x, y, p.w, p.h);
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = 3;
+          ctx.strokeRect(x, y, p.w, p.h);
+          ctx.strokeRect(x + 8, y + 6, 12, 6);
+          ctx.strokeRect(x + 24, y + 12, 12, 6);
+        } else if (p.type === "question") {
+          ctx.fillStyle = p.used ? "#8c6a30" : "#ffcc33";
+          ctx.fillRect(x, y, p.w, p.h);
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = 3;
+          ctx.strokeRect(x, y, p.w, p.h);
+          if (!p.used) {
+            ctx.fillStyle = "#000";
+            ctx.font = "bold 18px Courier New";
+            ctx.fillText("?", x + 16, y + 18);
+          }
+        } else if (p.type === "brickWide" || p.type === "bossPlatform") {
+          ctx.fillStyle = p.type === "bossPlatform" ? "#8b5cf6" : "#b87333";
+          ctx.fillRect(x, y, p.w, p.h);
+          ctx.strokeStyle = "#000";
+          ctx.strokeRect(x, y, p.w, p.h);
+          for (let i = 0; i < p.w; i += 24) ctx.strokeRect(x + i, y, 24, p.h);
+        }
+      });
+    }
+
+    function drawMovingPlatforms() {
+      activeMovingPlatforms().forEach(p => {
+        const x = p.x - cameraX;
+        const y = p.y;
+        ctx.fillStyle = "#00aa88";
+        ctx.fillRect(x, y, p.w, p.h);
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x, y, p.w, p.h);
+      });
+    }
+
+    function drawPipes() {
+      activePipes().forEach(pipe => {
+        const x = pipe.x - cameraX;
+        const y = pipe.y;
+        ctx.fillStyle = "#12a012";
+        ctx.fillRect(x, y, pipe.w, pipe.h);
+        ctx.fillStyle = "#19c319";
+        ctx.fillRect(x - 8, y, pipe.w + 16, 20);
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x, y, pipe.w, pipe.h);
+        ctx.strokeRect(x - 8, y, pipe.w + 16, 20);
+      });
+    }
+
+    function drawCoins() {
+      activeCoins().forEach(coin => {
+        if (coin.taken) return;
+        const x = coin.x - cameraX;
+        const y = coin.y;
+        ctx.fillStyle = "#ffd700";
+        ctx.beginPath();
+        ctx.ellipse(x, y, coin.r - 2, coin.r, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#b8860b";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.strokeStyle = "#fff4a3";
+        ctx.beginPath();
+        ctx.moveTo(x, y - 7);
+        ctx.lineTo(x, y + 7);
+        ctx.stroke();
+      });
+    }
+
+    function drawPowerups() {
+      mushrooms.forEach(m => {
+        if (!m.active || m.area !== currentArea) return;
+        const x = m.x - cameraX;
+        const y = m.y;
+
+        if (m.kind === "mushroom") {
+          ctx.fillStyle = "#e53935";
+          ctx.fillRect(x + 4, y, 20, 12);
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(x + 8, y + 2, 4, 4);
+          ctx.fillRect(x + 16, y + 4, 4, 4);
+          ctx.fillStyle = "#f2c28b";
+          ctx.fillRect(x + 8, y + 12, 12, 12);
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(x + 10, y + 16, 2, 2);
+          ctx.fillRect(x + 16, y + 16, 2, 2);
+        } else {
+          ctx.fillStyle = "#ff3b30";
+          ctx.fillRect(x + 6, y + 4, 16, 8);
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(x + 10, y + 2, 4, 4);
+          ctx.fillRect(x + 16, y + 2, 4, 4);
+          ctx.fillStyle = "#2ecc71";
+          ctx.fillRect(x + 8, y + 12, 12, 12);
+        }
+      });
+    }
+
+    function drawFireballs() {
+      fireballs.forEach(f => {
+        if (!f.active || f.area !== currentArea) return;
+        const x = f.x - cameraX;
+        const y = f.y;
+        ctx.fillStyle = "#ff7a00";
+        ctx.beginPath();
+        ctx.arc(x + 7, y + 7, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#ffd54a";
+        ctx.beginPath();
+        ctx.arc(x + 7, y + 7, 3, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      bossFireballs.forEach(f => {
+        if (!f.active || f.area !== currentArea) return;
+        const x = f.x - cameraX;
+        const y = f.y;
+        ctx.fillStyle = "#8b0000";
+        ctx.beginPath();
+        ctx.arc(x + 9, y + 9, 9, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#ff3b30";
+        ctx.beginPath();
+        ctx.arc(x + 9, y + 9, 4, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    function drawEnemies() {
+      activeEnemies().forEach(enemy => {
+        if (!enemy.alive) return;
+        const x = enemy.x - cameraX;
+        const y = enemy.y;
+        ctx.fillStyle = "#8b4513";
+        ctx.fillRect(x, y + 12, enemy.w, enemy.h - 12);
+        ctx.fillStyle = "#5a2d0c";
+        ctx.fillRect(x + 4, y, enemy.w - 8, 18);
+        ctx.fillStyle = "white";
+        ctx.fillRect(x + 10, y + 6, 6, 6);
+        ctx.fillRect(x + 24, y + 6, 6, 6);
+        ctx.fillStyle = "black";
+        ctx.fillRect(x + 12, y + 8, 2, 2);
+        ctx.fillRect(x + 26, y + 8, 2, 2);
+        ctx.fillStyle = "#000";
+        ctx.fillRect(x + 8, y + enemy.h - 3, 8, 3);
+        ctx.fillRect(x + 24, y + enemy.h - 3, 8, 3);
+      });
+    }
+
+    function drawCheckpoint() {
+      if (currentArea !== "overworld") return;
+      const x = checkpoint.x - cameraX;
+      const y = checkpoint.y;
+      ctx.fillStyle = "#ddd";
+      ctx.fillRect(x, y, checkpoint.w, checkpoint.h);
+      ctx.fillStyle = checkpoint.active ? "#00ff55" : "#ffcc00";
+      ctx.beginPath();
+      ctx.moveTo(x + checkpoint.w, y + 20);
+      ctx.lineTo(x + 70, y + 40);
+      ctx.lineTo(x + checkpoint.w, y + 60);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawBoss() {
+      if (currentArea !== "overworld" || !boss.alive) return;
+      const x = boss.x - cameraX;
+      const y = boss.y;
+
+      ctx.fillStyle = "#ff8c00";
+      ctx.fillRect(x + 10, y + 18, 72, 60);
+      ctx.fillStyle = "#a0522d";
+      ctx.fillRect(x + 16, y, 60, 28);
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(x + 26, y + 10, 10, 10);
+      ctx.fillRect(x + 54, y + 10, 10, 10);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(x + 30, y + 14, 4, 4);
+      ctx.fillRect(x + 58, y + 14, 4, 4);
+      ctx.fillStyle = "#228b22";
+      ctx.fillRect(x + 4, y + 16, 8, 24);
+      ctx.fillRect(x + 80, y + 16, 8, 24);
+      ctx.fillStyle = "#b22222";
+      ctx.fillRect(x + 18, y - 8, 56, 8);
+      ctx.fillStyle = "#fff";
+      for (let i = 0; i < boss.health; i++) ctx.fillRect(x + i * 12, y - 24, 10, 8);
+    }
+
+    function drawPlayer() {
+      const x = player.x - cameraX;
+      const y = player.y;
+
+      if (player.invincibleTimer > 0 && Math.floor(player.invincibleTimer / 5) % 2 === 0) return;
+
+      const bodyTop = player.power === "small" ? y + 20 : y + 26;
+      const legTop = player.power === "small" ? y + 42 : y + 58;
+      const headTop = player.power === "small" ? y + 8 : y + 10;
+      const headH = player.power === "small" ? 18 : 22;
+
+      ctx.fillStyle = "#1f4f1f";
+      ctx.fillRect(x + 8, legTop, 10, 16);
+      ctx.fillRect(x + 24, legTop, 10, 16);
+
+      ctx.fillStyle = player.power === "fire" ? "#ffffff" : "#1db31d";
+      ctx.fillRect(x + 7, bodyTop, 28, player.power === "small" ? 24 : 32);
+
+      ctx.fillStyle = "#0b3ea8";
+      ctx.fillRect(x + 10, bodyTop + 10, 22, player.power === "small" ? 14 : 18);
+
+      ctx.fillStyle = "#f2c28b";
+      if (player.facing === 1) {
+        ctx.fillRect(x + 31, bodyTop + 4, 8, 12);
+        ctx.fillRect(x + 4, bodyTop + 4, 6, 12);
+      } else {
+        ctx.fillRect(x + 3, bodyTop + 4, 8, 12);
+        ctx.fillRect(x + 32, bodyTop + 4, 6, 12);
+      }
+
+      ctx.fillStyle = "#f2c28b";
+      ctx.fillRect(x + 10, headTop, 22, headH);
+
+      ctx.fillStyle = "#14a414";
+      ctx.fillRect(x + 8, y, 26, 10);
+      ctx.fillRect(x + 4, y + 8, 34, 6);
+
+      ctx.fillStyle = "white";
+      ctx.fillRect(x + 18, y + 2, 8, 6);
+
+      ctx.fillStyle = "black";
+      if (player.facing === 1) {
+        ctx.fillRect(x + 24, headTop + 6, 3, 3);
+        ctx.fillRect(x + 28, headTop + 10, 6, 3);
+      } else {
+        ctx.fillRect(x + 15, headTop + 6, 3, 3);
+        ctx.fillRect(x + 8, headTop + 10, 6, 3);
+      }
+
+      ctx.fillStyle = "#552200";
+      ctx.fillRect(x + 6, legTop + 14, 12, 4);
+      ctx.fillRect(x + 24, legTop + 14, 12, 4);
+    }
+
+    function drawFlag() {
+      if (currentArea !== "overworld") return;
+      const poleX = 7480 - cameraX;
+      const poleY = 260;
+      ctx.fillStyle = "#dddddd";
+      ctx.fillRect(poleX, poleY, 8, 300);
+      ctx.fillStyle = "#00aa00";
+      ctx.beginPath();
+      ctx.arc(poleX + 4, poleY, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#00ff44";
+      ctx.beginPath();
+      ctx.moveTo(poleX + 8, poleY + 25);
+      ctx.lineTo(poleX + 70, poleY + 45);
+      ctx.lineTo(poleX + 8, poleY + 65);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawCastle() {
+      if (currentArea !== "overworld") return;
+      const x = WORLD_WIDTH - 120 - cameraX;
+      const y = GROUND_Y - 100;
+      ctx.fillStyle = "#888";
+      ctx.fillRect(x, y, 120, 100);
+      ctx.fillRect(x + 18, y - 35, 24, 35);
+      ctx.fillRect(x + 78, y - 35, 24, 35);
+      ctx.fillStyle = "#444";
+      ctx.fillRect(x + 45, y + 45, 30, 55);
+    }
+
+    function drawTitleScreen() {
+      drawSky();
+
+      ctx.fillStyle = "rgba(0,0,0,0.25)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 56px Courier New";
+      ctx.fillText("GREEN MARIO", canvas.width / 2, 160);
+      ctx.font = "bold 32px Courier New";
+      ctx.fillText("ADVENTURE ULTIMATE", canvas.width / 2, 210);
+
+      ctx.font = "bold 24px Courier New";
+      ctx.fillText("Choose World", canvas.width / 2, 300);
+
+      for (let i = 0; i < worlds.length; i++) {
+        const x = canvas.width / 2 - 260 + i * 260;
+        const y = 340;
+
+        ctx.fillStyle = i === selectedWorld ? "#ffd700" : "#ffffff";
+        ctx.fillRect(x, y, 200, 120);
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 4;
+        ctx.strokeRect(x, y, 200, 120);
+
+        ctx.fillStyle = worlds[i].sky;
+        ctx.fillRect(x + 10, y + 10, 180, 70);
+        ctx.fillStyle = worlds[i].mountain;
+        ctx.beginPath();
+        ctx.moveTo(x + 20, y + 80);
+        ctx.lineTo(x + 80, y + 35);
+        ctx.lineTo(x + 140, y + 80);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = "#000";
+        ctx.font = "bold 18px Courier New";
+        ctx.fillText(worlds[i].name, x + 100, y + 105);
+      }
+
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 24px Courier New";
+      ctx.fillText("Left / Right to Choose", canvas.width / 2, 520);
+      ctx.fillText("Press Enter to Start", canvas.width / 2, 560);
+      ctx.textAlign = "left";
+    }
+
+    function drawOverlayMessage(title, subtitle) {
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "white";
+      ctx.textAlign = "center";
+      ctx.font = "bold 48px Courier New";
+      ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 20);
+      ctx.font = "bold 24px Courier New";
+      ctx.fillText(subtitle, canvas.width / 2, canvas.height / 2 + 30);
+      ctx.textAlign = "left";
+    }
+
+    function drawGame() {
+      drawSky();
+      drawMountains();
+      drawBushes();
+      drawPlatforms();
+      drawMovingPlatforms();
+      drawPipes();
+      drawCoins();
+      drawPowerups();
+      drawFireballs();
+      drawEnemies();
+      drawCheckpoint();
+      drawBoss();
+      drawFlag();
+      drawCastle();
+      drawPlayer();
+
+      if (gameState === "gameover") drawOverlayMessage("GAME OVER", "Press R to Restart");
+      if (gameState === "win") drawOverlayMessage("YOU WIN!", "Press R to Play Again");
+    }
+
+    function updateUI() {
+      scoreText.textContent = "Score: " + score;
+      coinText.textContent = "Coins: " + coinsCollected;
+      powerText.textContent = "Power: " + (player.power === "small" ? "Small" : player.power === "big" ? "Big Green" : "Fire Green");
+      fireText.textContent = "Fireballs: " + (player.power === "fire" ? "Ready" : "No");
+      livesText.textContent = "Lives: " + lives;
+
+      if (gameState === "title") statusText.textContent = "Press Enter to Start";
+      else if (gameState === "playing") {
+        if (!checkpointActivated) statusText.textContent = "Reach the checkpoint and beat the boss!";
+      }
+    }
+
+    function startGame() {
+      worldTheme = worlds[selectedWorld];
+      lives = 3;
+      score = 0;
+      coinsCollected = 0;
+      hardReset(false);
+      gameState = "playing";
+      updateUI();
+      statusText.textContent = "Good luck!";
+    }
+
+    function hardReset(goTitle = true) {
+      player.x = overworldStart.x;
+      player.y = overworldStart.y;
+      player.vx = 0;
+      player.vy = 0;
+      player.onGround = false;
+      player.facing = 1;
+      player.power = "small";
+      player.invincibleTimer = 0;
+      setPlayerSize();
+
+      if (goTitle) {
+        gameState = "title";
+        lives = 3;
+        score = 0;
+        coinsCollected = 0;
+      }
+
+      cameraX = 0;
+      currentArea = "overworld";
+      pipeCooldown = 0;
+      fireCooldown = 0;
+      checkpointActivated = false;
+      checkpoint.active = false;
+
+      boss.x = 7220;
+      boss.y = 470;
+      boss.vx = -1.2;
+      boss.health = 6;
+      boss.alive = true;
+      boss.jumpTimer = 0;
+      boss.shootTimer = 0;
+
+      mushrooms.length = 0;
+      fireballs.length = 0;
+      bossFireballs.length = 0;
+
+      coins.forEach(c => c.taken = false);
+      enemies.forEach((e, i) => {
+        e.alive = true;
+        const starts = [900, 1580, 2470, 3550, 4520, 6250, 830];
+        const dirs = [-1.2, 1.2, -1.4, 1.1, -1.2, -1.3, 1.1];
+        e.x = starts[i];
+        e.vx = dirs[i];
+      });
+
+      platforms.forEach(p => {
+        if (p.type === "brick") p.broken = false;
+        if (p.type === "question") p.used = false;
+      });
+
+      movingPlatforms[0].x = 5200;
+      movingPlatforms[1].x = 5480;
+      movingPlatforms[2].x = 1250;
+
+      updateUI();
+    }
+
+    function loop() {
+      if (gameState === "playing") {
+        updateMovingPlatforms();
+        updatePowerups();
+        updateFireballs();
+        updateEnemies();
+        updateBoss();
+        updatePlayer();
+      }
+
+      if (gameState === "title") drawTitleScreen();
+      else drawGame();
+
+      requestAnimationFrame(loop);
+    }
+
+    hardReset(true);
+    loop();
+  </script>
+</body>
+</html>
